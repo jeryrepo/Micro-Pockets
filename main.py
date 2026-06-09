@@ -440,6 +440,32 @@ async def _route(
         )
         return
 
+    # ── Remember merchant mapping ──────────────────────────────────────
+    if pending_action == "remember_merchant":
+        if lower in ("yes", "y", "sure", "ok", "yep", "yeah"):
+            from agents.ingestion_agent import save_merchant_mapping
+            await save_merchant_mapping(
+                user["_id"],
+                pending.get("merchant", ""),
+                pending.get("slug", "")
+            )
+            await users_col.update_one(
+                {"whatsapp_number": sender},
+                {"$unset": {"pending_intent": ""}}
+            )
+            await send_whatsapp_message(sender,
+                f"✅ Got it! I'll always add "
+                f"*{pending.get('merchant')}* to "
+                f"*{pending.get('name')}* from now on."
+            )
+        else:
+            await users_col.update_one(
+                {"whatsapp_number": sender},
+                {"$unset": {"pending_intent": ""}}
+            )
+            await send_whatsapp_message(sender, "👍 No problem.")
+        return
+
     # ── Normal flow — run through interpreter then route ─────────────
     intent = await interpret(body)
     i      = intent["intent"]

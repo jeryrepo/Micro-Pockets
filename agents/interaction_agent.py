@@ -1,16 +1,22 @@
 """
 interaction_agent.py
 ────────────────────
-Interaction Agent — handles all manual user CRUD operations.
+Interaction Agent — handles all WRITE operations.
 
-Receives structured intent from interpreter_agent.py
-Reads/writes MongoDB via mcp_tools.py
-Sends WhatsApp replies via send_whatsapp_message()
+Responsibilities:
+  add_expense      → log a transaction (pending_review → confirmed)
+  delete_expense   → soft-delete last confirmed transaction
+  create_pocket    → create a new budget pocket
+  update_budget    → change pocket budget limit
+  rename_pocket    → rename an existing pocket
+  delete_pocket    → deactivate a pocket
+  add_income       → update monthly income
+  set_advisor_mode → change advisor notification preference
+  confirm          → confirm a pending transaction
+  cancel           → cancel a pending action
 
-Handles:
-  add_expense, delete_expense, query_balance, query_transactions,
-  monthly_summary, create_pocket, update_budget, rename_pocket,
-  delete_pocket, add_income, set_advisor_mode, confirm, cancel, help
+Never reads for display purposes — that is query_agent's job.
+All balance updates are atomic using $inc to prevent race conditions.
 """
 
 from core.database import users_col, pockets_col, transactions_col
@@ -22,27 +28,21 @@ async def handle(
     sender: str,
     intent: dict,
     user: dict,
-    send_message   # callable — send_whatsapp_message from main.py
+    send_message
 ):
-    """
-    Main entry point. Routes to the correct handler based on intent.
-    """
+    """Main entry point — routes to correct write handler."""
     i = intent["intent"]
 
-    if   i == "add_expense":        await _add_expense(sender, intent, user, send_message)
-    elif i == "delete_expense":     await _delete_expense(sender, user, send_message)
-    elif i == "query_balance":      await _query_balance(sender, intent, user, send_message)
-    elif i == "query_transactions": await _query_transactions(sender, intent, user, send_message)
-    elif i == "monthly_summary":    await _monthly_summary(sender, user, send_message)
-    elif i == "create_pocket":      await _create_pocket(sender, intent, user, send_message)
-    elif i == "update_budget":      await _update_budget(sender, intent, user, send_message)
-    elif i == "rename_pocket":      await _rename_pocket(sender, intent, user, send_message)
-    elif i == "delete_pocket":      await _delete_pocket(sender, intent, user, send_message)
-    elif i == "add_income":         await _add_income(sender, intent, user, send_message)
-    elif i == "set_advisor_mode":   await _set_advisor_mode(sender, intent, user, send_message)
-    elif i == "confirm":            await _confirm(sender, user, send_message)
-    elif i == "cancel":             await _cancel(sender, user, send_message)
-    else:                           await _help(sender, send_message)
+    if   i == "add_expense":       await _add_expense(sender, intent, user, send_message)
+    elif i == "delete_expense":    await _delete_expense(sender, user, send_message)
+    elif i == "create_pocket":     await _create_pocket(sender, intent, user, send_message)
+    elif i == "update_budget":     await _update_budget(sender, intent, user, send_message)
+    elif i == "rename_pocket":     await _rename_pocket(sender, intent, user, send_message)
+    elif i == "delete_pocket":     await _delete_pocket(sender, intent, user, send_message)
+    elif i == "add_income":        await _add_income(sender, intent, user, send_message)
+    elif i == "set_advisor_mode":  await _set_advisor_mode(sender, intent, user, send_message)
+    elif i == "confirm":           await _confirm(sender, user, send_message)
+    elif i == "cancel":            await _cancel(sender, user, send_message)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -67,18 +67,22 @@ async def _add_expense(
             "I couldn't find an amount. Try: _spent 500 on food_")
         return
 
-    # Try to find the pocket by slug
     pocket = None
     if slug:
         pocket = await pockets_col.find_one({
             "user_id": user_id, "slug": slug, "is_active": True
         })
 
-    # Pocket not found — ask user which one
     if not pocket:
         pockets = await pockets_col.find(
             {"user_id": user_id, "is_active": True}
         ).to_list(20)
+
+        if not pockets:
+            await send_message(sender,
+                "You have no pockets yet.\n"
+                "Create one first: _create pocket food 5000_")
+            return
 
         pocket_list = "\n".join([
             f"• *{p['name']}* — {p['current_balance']:.0f} {currency} left"
@@ -88,7 +92,6 @@ async def _add_expense(
             f"Which pocket for *{amount:.0f} {currency}*?\n\n"
             f"{pocket_list}\n\n_Reply with the pocket name_"
         )
-        # Store pending intent so confirm step knows what to do
         await users_col.update_one(
             {"whatsapp_number": sender},
             {"$set": {"pending_intent": {
@@ -101,7 +104,6 @@ async def _add_expense(
         )
         return
 
-    # Insert transaction as pending_review
     result = await transactions_col.insert_one({
         "user_id":           user_id,
         "pocket_id":         pocket["_id"],
@@ -116,7 +118,6 @@ async def _add_expense(
         "source":            source
     })
 
-    # Save pending txn id for confirm step
     await users_col.update_one(
         {"whatsapp_number": sender},
         {"$set": {"pending_txn_id": str(result.inserted_id)}}
@@ -141,8 +142,8 @@ async def _confirm(sender: str, user: dict, send_message):
 
     txn_id = user.get("pending_txn_id")
     if not txn_id:
-        await send_message(sender,
-            "Nothing pending to confirm. What would you like to do?")
+        # Silent ack — user said ok after something like advisor mode change
+        await send_message(sender, "👍 Got it!")
         return
 
     txn = await transactions_col.find_one({"_id": ObjectId(txn_id)})
@@ -150,20 +151,17 @@ async def _confirm(sender: str, user: dict, send_message):
         await send_message(sender, "Transaction already processed.")
         return
 
-    # Confirm transaction
     await transactions_col.update_one(
         {"_id": ObjectId(txn_id)},
         {"$set": {"status": "confirmed"}}
     )
 
-    # Atomic balance deduction
     updated_pocket = await pockets_col.find_one_and_update(
         {"_id": txn["pocket_id"]},
         {"$inc": {"current_balance": -txn["amount_base"]}},
         return_document=True
     )
 
-    # Clear pending state
     await users_col.update_one(
         {"whatsapp_number": sender},
         {"$unset": {"pending_txn_id": "", "pending_intent": ""}}
@@ -176,7 +174,33 @@ async def _confirm(sender: str, user: dict, send_message):
         f"*{updated_pocket['current_balance']:.2f} {currency}*"
     )
 
-    # Let advisor check if alert needed
+    # ── Offer to remember merchant mapping if it was a Gemini guess ───
+    learn_data = user.get("pending_merchant_learn", {})
+    if learn_data and learn_data.get("merchant"):
+        merchant    = learn_data["merchant"]
+        pocket_name = updated_pocket.get("name", "")
+        slug        = updated_pocket.get("slug", "")
+
+        # Clear learn data
+        await users_col.update_one(
+            {"whatsapp_number": sender},
+            {"$unset": {"pending_merchant_learn": ""}}
+        )
+        # Set pending intent for yes/no response
+        await users_col.update_one(
+            {"whatsapp_number": sender},
+            {"$set": {"pending_intent": {
+                "action":   "remember_merchant",
+                "merchant": merchant,
+                "slug":     slug,
+                "name":     pocket_name
+            }}}
+        )
+        await send_message(sender,
+            f"💡 Always add *{merchant}* to *{pocket_name}*?\n"
+            "_Reply *yes* to remember this_"
+        )
+
     await check_alert(sender, user, updated_pocket, send_message)
 
 
@@ -219,7 +243,6 @@ async def _delete_expense(sender: str, user: dict, send_message):
         {"$set": {"status": "deleted"}}
     )
 
-    # Restore balance atomically
     restored = await pockets_col.find_one_and_update(
         {"_id": txn["pocket_id"]},
         {"$inc": {"current_balance": txn["amount_base"]}},
@@ -236,199 +259,17 @@ async def _delete_expense(sender: str, user: dict, send_message):
 
 
 # ─────────────────────────────────────────────────────────────────────
-#  QUERY BALANCE
-# ─────────────────────────────────────────────────────────────────────
-
-async def _query_balance(sender: str, intent: dict, user: dict, send_message):
-    user_id  = user["_id"]
-    currency = user.get("base_currency", "PKR")
-    slug     = intent.get("pocket")
-
-    if slug:
-        pocket = await pockets_col.find_one({
-            "user_id": user_id, "slug": slug, "is_active": True
-        })
-        if not pocket:
-            await send_message(sender,
-                f"I couldn't find a *{slug}* pocket.\n"
-                "Reply *balance* to see all your pockets.")
-            return
-
-        allocated = pocket["allocated_budget"]
-        spent     = allocated - pocket["current_balance"]
-        pct_used  = (spent / allocated * 100) if allocated else 0
-        pct_left  = max(0, 100 - pct_used)
-        icon      = "🔴" if pct_used >= 100 else "🔴" if pct_used >= 90 else "🟡" if pct_used >= 70 else "🟢"
-
-        if pocket["current_balance"] < 0:
-            over_by = abs(pocket["current_balance"])
-            income  = user.get("financial_profile", {}).get("monthly_income", 0)
-            name    = user.get("name", "")
-            warning = ""
-            if income and spent > income:
-                warning = f"\n\n🚨 *Whoa{' ' + name if name else ''}!* You've spent more than your monthly income on this pocket!"
-            status_line = f"🔴 Over budget by *{over_by:.0f} {currency}*{warning}"
-        else:
-            status_line = f"Remaining: *{pocket['current_balance']:.0f} {currency}* ({pct_left:.0f}% left)"
-
-        await send_message(sender,
-            f"{icon} *{pocket['name']}*\n"
-            f"Budget: {allocated:.0f} {currency}\n"
-            f"Spent:  {max(spent, 0):.0f} {currency} ({pct_used:.0f}% used)\n"
-            f"{status_line}"
-        )
-    else:
-        pockets = await pockets_col.find(
-            {"user_id": user_id, "is_active": True}
-        ).to_list(20)
-
-        if not pockets:
-            await send_message(sender, "You have no active pockets yet.")
-            return
-
-        income = user.get("financial_profile", {}).get("monthly_income", 0)
-        name   = user.get("name", "")
-        lines  = ["📊 *Your Pockets*\n"]
-
-        total_spent = 0
-        for p in pockets:
-            allocated = p["allocated_budget"]
-            spent_p   = allocated - p["current_balance"]
-            pct_used  = (spent_p / allocated * 100) if allocated else 0
-            pct_left  = max(0, 100 - pct_used)
-            total_spent += max(spent_p, 0)
-
-            if p["current_balance"] < 0:
-                over_by = abs(p["current_balance"])
-                status  = f"🔴 over by {over_by:.0f}"
-            else:
-                icon   = "🔴" if pct_used >= 90 else "🟡" if pct_used >= 70 else "🟢"
-                status = f"{icon} {pct_left:.0f}% left"
-
-            lines.append(
-                f"*{p['name']}*: {max(spent_p,0):.0f}/{allocated:.0f} {currency} — {status}"
-            )
-
-        # Warn if total spending exceeds income
-        if income and total_spent > income:
-            lines.append(
-                f"\n🚨 *{'Hey ' + name + '!' if name else 'Warning!'}* "
-                f"Total spending ({total_spent:.0f}) exceeds your monthly income ({income:.0f} {currency})!"
-            )
-
-        await send_message(sender, "\n".join(lines))
-
-
-# ─────────────────────────────────────────────────────────────────────
-#  QUERY TRANSACTIONS
-# ─────────────────────────────────────────────────────────────────────
-
-async def _query_transactions(sender: str, intent: dict, user: dict, send_message):
-    user_id  = user["_id"]
-    currency = user.get("base_currency", "PKR")
-    slug     = intent.get("pocket")
-
-    query = {"user_id": user_id, "status": "confirmed"}
-    if slug:
-        pocket = await pockets_col.find_one(
-            {"user_id": user_id, "slug": slug, "is_active": True}
-        )
-        if pocket:
-            query["pocket_id"] = pocket["_id"]
-
-    txns = await transactions_col.find(query).sort(
-        "timestamp", -1
-    ).to_list(10)
-
-    if not txns:
-        await send_message(sender,
-            "No transactions found yet.\n"
-            "Start logging: _spent 500 on food_")
-        return
-
-    lines = ["🧾 *Recent Transactions*\n"]
-    for t in txns:
-        date = t["timestamp"].strftime("%d %b")
-        lines.append(
-            f"• {date} — *{t['amount_base']:.0f} {currency}* "
-            f"({t.get('merchant', 'expense')})"
-        )
-    await send_message(sender, "\n".join(lines))
-
-
-# ─────────────────────────────────────────────────────────────────────
-#  MONTHLY SUMMARY
-# ─────────────────────────────────────────────────────────────────────
-
-async def _monthly_summary(sender: str, user: dict, send_message):
-    from core.mcp_tools import aggregate_monthly_trends
-
-    user_id  = str(user["_id"])
-    currency = user.get("base_currency", "PKR")
-    trends   = await aggregate_monthly_trends(user_id)
-
-    if not trends:
-        await send_message(sender,
-            "No confirmed transactions this month yet.\n"
-            "Start logging: _spent 500 on food_")
-        return
-
-    now         = datetime.now(timezone.utc)
-    name        = user.get("name", "")
-    month_label = now.strftime('%B %Y')
-    summary_title = f"{name}'s {month_label} Summary" if name else f"{month_label} Summary"
-    lines       = [f"📈 *{summary_title}*\n"]
-    total_spent = 0
-
-    for t in trends:
-        pct_used = t.get("pct_used", 0)
-        pct_left = max(0, 100 - pct_used)
-        icon     = "🔴" if pct_used >= 100 else "🔴" if pct_used >= 90 else "🟡" if pct_used >= 70 else "🟢"
-
-        if t["total_spent"] > t["allocated_budget"]:
-            over_by    = t["total_spent"] - t["allocated_budget"]
-            status_str = f"over by {over_by:.0f} 🔴"
-        else:
-            status_str = f"{pct_left:.0f}% left"
-
-        lines.append(
-            f"{icon} *{t['pocket_name']}*: "
-            f"{t['total_spent']:.0f}/{t['allocated_budget']:.0f} "
-            f"{currency} — {status_str}"
-        )
-        total_spent += t["total_spent"]
-
-    lines.append(f"\n💸 *Total spent: {total_spent:.0f} {currency}*")
-
-    income = user.get("financial_profile", {}).get("monthly_income")
-    if income:
-        lines.append(
-            f"🎯 Savings target (20%): "
-            f"{income * 0.20:.0f} {currency}/month"
-        )
-        if total_spent > income:
-            name = user.get("name", "")
-            lines.append(
-                f"\n🚨 *{'Hey ' + name + '!' if name else 'Warning!'} "
-                f"You've spent more than your monthly income this month!*"
-            )
-
-    await send_message(sender, "\n".join(lines))
-
-
-# ─────────────────────────────────────────────────────────────────────
 #  CREATE POCKET
 # ─────────────────────────────────────────────────────────────────────
 
 async def _create_pocket(sender: str, intent: dict, user: dict, send_message):
-    from core.database import users_col
     user_id  = str(user["_id"])
     slug     = intent.get("pocket") or ""
     name     = slug.replace("-", " ").title() if slug else ""
     budget   = intent.get("amount")
     currency = user.get("base_currency", "PKR")
 
-    # No pocket name provided — ask for it
+    # No pocket name — ask for it
     if not slug or not name:
         await users_col.update_one(
             {"whatsapp_number": sender},
@@ -440,7 +281,7 @@ async def _create_pocket(sender: str, intent: dict, user: dict, send_message):
         )
         return
 
-    # Pocket name provided but no budget — ask for it
+    # Name provided but no budget — ask for it
     if not budget:
         await users_col.update_one(
             {"whatsapp_number": sender},
@@ -456,6 +297,7 @@ async def _create_pocket(sender: str, intent: dict, user: dict, send_message):
         )
         return
 
+    # Both name and budget — create it
     existing = await pockets_col.find_one({
         "user_id": ObjectId(user_id), "slug": slug, "is_active": True
     })
@@ -504,9 +346,16 @@ async def _update_budget(sender: str, intent: dict, user: dict, send_message):
         return
 
     if not amount:
+        await users_col.update_one(
+            {"whatsapp_number": sender},
+            {"$set": {"pending_intent": {
+                "action": "awaiting_budget_amount",
+                "pocket_slug": slug
+            }}}
+        )
         await send_message(sender,
             f"What should the new budget for *{slug}* be?\n"
-            f"_e.g. change {slug} budget to 3000_")
+            f"_e.g. 5000_")
         return
 
     result = await pockets_col.find_one_and_update(
@@ -633,7 +482,7 @@ async def _set_advisor_mode(sender: str, intent: dict, user: dict, send_message)
         await send_message(sender,
             "Please specify:\n"
             "• *turn off advice*\n"
-            "• *alert me when I overspend*\n"
+            "• *turn on advisor* (proactive alerts)\n"
             "• *only advise when I ask*")
         return
 
@@ -648,38 +497,3 @@ async def _set_advisor_mode(sender: str, intent: dict, user: dict, send_message)
         "on_request": "💬 I'll only advise when you ask."
     }
     await send_message(sender, labels[mode])
-
-
-# ─────────────────────────────────────────────────────────────────────
-#  HELP
-# ─────────────────────────────────────────────────────────────────────
-
-async def _help(sender: str, send_message):
-    from core.database import users_col
-    user = await users_col.find_one({"whatsapp_number": sender})
-    name = user.get("name", "") if user else ""
-
-    await send_message(sender,
-        f"👋 *{'Hey ' + name + '!' if name else 'Hey!'} Here's what I can do:*\n\n"
-        "💰 *Log expense*\n"
-        "   _spent 500 on food_\n"
-        "   _uber 450_\n\n"
-        "📊 *Check balance*\n"
-        "   _how much left in food_\n"
-        "   _balance_\n\n"
-        "🧾 *Transactions*\n"
-        "   _what did I spend today_\n"
-        "   _show food transactions_\n\n"
-        "📈 *Monthly summary*\n"
-        "   _how am I doing this month_\n\n"
-        "➕ *Manage pockets*\n"
-        "   _create pocket travel 5000_\n"
-        "   _change food budget to 3000_\n"
-        "   _rename food to groceries_\n"
-        "   _delete travel pocket_\n\n"
-        "💵 *Update income*\n"
-        "   _my salary is 150000_\n\n"
-        "⚙️  *Advisor settings*\n"
-        "   _turn off advice_\n"
-        "   _alert me when I overspend_"
-    )
