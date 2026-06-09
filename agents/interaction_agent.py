@@ -13,7 +13,7 @@ Handles:
   delete_pocket, add_income, set_advisor_mode, confirm, cancel, help
 """
 
-from database import users_col, pockets_col, transactions_col
+from core.database import users_col, pockets_col, transactions_col
 from bson import ObjectId
 from datetime import datetime, timezone
 
@@ -361,7 +361,7 @@ async def _query_transactions(sender: str, intent: dict, user: dict, send_messag
 # ─────────────────────────────────────────────────────────────────────
 
 async def _monthly_summary(sender: str, user: dict, send_message):
-    from mcp_tools import aggregate_monthly_trends
+    from core.mcp_tools import aggregate_monthly_trends
 
     user_id  = str(user["_id"])
     currency = user.get("base_currency", "PKR")
@@ -421,7 +421,7 @@ async def _monthly_summary(sender: str, user: dict, send_message):
 # ─────────────────────────────────────────────────────────────────────
 
 async def _create_pocket(sender: str, intent: dict, user: dict, send_message):
-    from database import users_col
+    from core.database import users_col
     user_id  = str(user["_id"])
     slug     = intent.get("pocket") or ""
     name     = slug.replace("-", " ").title() if slug else ""
@@ -655,7 +655,7 @@ async def _set_advisor_mode(sender: str, intent: dict, user: dict, send_message)
 # ─────────────────────────────────────────────────────────────────────
 
 async def _help(sender: str, send_message):
-    from database import users_col
+    from core.database import users_col
     user = await users_col.find_one({"whatsapp_number": sender})
     name = user.get("name", "") if user else ""
 

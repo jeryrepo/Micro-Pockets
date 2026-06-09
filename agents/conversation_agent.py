@@ -27,7 +27,7 @@ import os
 import json
 from google import genai
 from google.genai import types
-from database import users_col, pockets_col, transactions_col, conversations_col
+from core.database import users_col, pockets_col, transactions_col, conversations_col
 from bson import ObjectId
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -51,7 +51,7 @@ async def _build_snapshot(user: dict) -> dict:
     Build a complete financial snapshot to give Gemini full context.
     Includes pockets, recent transactions, and month comparisons.
     """
-    from mcp_tools import aggregate_monthly_trends, aggregate_monthly_trends_for
+    from core.mcp_tools import aggregate_monthly_trends, aggregate_monthly_trends_for
 
     user_id  = user["_id"]
     currency = user.get("base_currency", "PKR")

@@ -15,7 +15,7 @@ Never writes to MongoDB. Never modifies any document.
 All reads go through mcp_tools.py aggregations or direct collection queries.
 """
 
-from database import users_col, pockets_col, transactions_col
+from core.database import users_col, pockets_col, transactions_col
 from bson import ObjectId
 from datetime import datetime, timezone
 
@@ -222,7 +222,7 @@ async def _query_transactions(sender: str, intent: dict, user: dict, send_messag
 
 async def _monthly_summary(sender: str, user: dict, send_message):
     """Full month spending overview with savings check."""
-    from mcp_tools import aggregate_monthly_trends
+    from core.mcp_tools import aggregate_monthly_trends
 
     user_id  = str(user["_id"])
     currency = user.get("base_currency", "PKR")
@@ -312,7 +312,7 @@ async def _request_advice(sender: str, user: dict, send_message):
     On_request path — fires when user explicitly asks.
     Also explains what the advisor is if user asks.
     """
-    from mcp_tools import aggregate_monthly_trends
+    from core.mcp_tools import aggregate_monthly_trends
 
     currency = user.get("base_currency", "PKR")
     name     = user.get("name", "")

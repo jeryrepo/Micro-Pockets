@@ -12,7 +12,7 @@ Never fires unsolicited unless advisor_mode = proactive AND threshold crossed.
 Fires max once per pocket per month (alert_snoozed flag).
 """
 
-from database import users_col, pockets_col, transactions_col
+from core.database import users_col, pockets_col, transactions_col
 from bson import ObjectId
 from datetime import datetime, timezone
 
@@ -87,7 +87,7 @@ async def advise_spending(
     Called from query_agent when intent = request_advice
     and the user is asking about income management.
     """
-    from mcp_tools import aggregate_monthly_trends
+    from core.mcp_tools import aggregate_monthly_trends
 
     currency = user.get("base_currency", "PKR")
     name     = user.get("name", "")

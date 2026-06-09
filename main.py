@@ -12,7 +12,7 @@ import secrets
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import RedirectResponse, HTMLResponse
 from dotenv import load_dotenv
-from database import users_col, pockets_col, transactions_col, conversations_col
+from core.database import users_col, pockets_col, transactions_col, conversations_col
 from bson import ObjectId
 from datetime import datetime, timezone
 
@@ -23,7 +23,7 @@ app = FastAPI(title="Micro-Pockets Core")
 
 @app.on_event("startup")
 async def startup_event():
-    from database import create_indexes
+    from core.database import create_indexes
     await create_indexes()
     print("✅ Micro-Pockets API is live.")
 
@@ -138,7 +138,7 @@ async def whatsapp_inbound(request: Request):
             print(f"VOICE NOTE from {sender} — media_id: {media_id}")
             await send_whatsapp_message(sender, "_🎤 Listening..._")
 
-            from voice_agent import transcribe
+            from agents.voice_agent import transcribe
             result = await transcribe(media_id)
 
             if not result["success"] or not result["transcript"]:
@@ -199,14 +199,14 @@ async def bank_inbound(request: Request):
     if not sms_body or user_phone == "unknown":
         return {"status": "ignored"}
 
-    from interpreter_agent import interpret
+    from agents.interpreter_agent import interpret
     intent = await interpret(sms_body)
     print(f"BANK INTENT: {intent['intent']} | {intent['amount']} | {intent['merchant']}")
 
     if intent["intent"] == "bank_sms":
         user = await users_col.find_one({"whatsapp_number": user_phone})
         if user:
-            from ingestion_agent import process
+            from agents.ingestion_agent import process
             await process(user_phone, intent, user, send_whatsapp_message)
         else:
             await transactions_col.insert_one({
@@ -327,7 +327,7 @@ async def _route(
     language: str = "en",
     language_name: str = "English"
 ):
-    from interpreter_agent import interpret
+    from agents.interpreter_agent import interpret
 
     lower = body.lower().strip()
 
@@ -455,7 +455,7 @@ async def _route(
     if i == "conversational_query" or (
         i == "unknown" and len(body.split()) > 4
     ):
-        from conversation_agent import handle as convo_handle
+        from agents.conversation_agent import handle as convo_handle
         await convo_handle(
             sender, body, user,
             detected_lang, detected_lang_name,
@@ -474,12 +474,12 @@ async def _route(
         "help",
         "unknown"
     ):
-        from query_agent import handle as query_handle
+        from agents.query_agent import handle as query_handle
         await query_handle(sender, intent, user, send_whatsapp_message)
 
     # WRITE intents → interaction_agent
     else:
-        from interaction_agent import handle as interaction_handle
+        from agents.interaction_agent import handle as interaction_handle
         await interaction_handle(sender, intent, user, send_whatsapp_message)
 
 
