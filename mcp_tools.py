@@ -278,3 +278,52 @@ async def aggregate_monthly_trends(user_id: str) -> list:
 
     cursor = transactions_col.aggregate(pipeline)
     return await cursor.to_list(length=50)
+
+
+async def aggregate_monthly_trends_for(user_id: str, month: int, year: int) -> list:
+    """
+    Aggregate spending for a specific month and year.
+    Used for month-over-month comparisons in conversation_agent.
+    """
+    import calendar
+    start = datetime(year, month, 1, tzinfo=timezone.utc)
+    _, last_day = calendar.monthrange(year, month)
+    end   = datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
+
+    pipeline = [
+        {"$match": {
+            "user_id":   ObjectId(user_id),
+            "status":    "confirmed",
+            "timestamp": {"$gte": start, "$lte": end}
+        }},
+        {"$group": {
+            "_id":         "$pocket_id",
+            "total_spent": {"$sum": "$amount_base"},
+            "count":       {"$sum": 1}
+        }},
+        {"$lookup": {
+            "from":         "pockets",
+            "localField":   "_id",
+            "foreignField": "_id",
+            "as":           "pocket"
+        }},
+        {"$unwind": "$pocket"},
+        {"$project": {
+            "pocket_name":      "$pocket.name",
+            "allocated_budget": "$pocket.allocated_budget",
+            "total_spent":      1,
+            "count":            1,
+            "remaining": {
+                "$subtract": ["$pocket.allocated_budget", "$total_spent"]
+            },
+            "pct_used": {
+                "$multiply": [
+                    {"$divide": ["$total_spent", "$pocket.allocated_budget"]},
+                    100
+                ]
+            }
+        }}
+    ]
+
+    cursor = transactions_col.aggregate(pipeline)
+    return await cursor.to_list(length=50)
