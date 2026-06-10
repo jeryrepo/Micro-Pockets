@@ -21,6 +21,7 @@ load_dotenv()
 
 app = FastAPI(title="Micro-Pockets Core")
 
+
 @app.on_event("startup")
 async def startup_event():
     from core.database import create_indexes
@@ -201,6 +202,8 @@ async def whatsapp_inbound(request: Request):
 
     except (KeyError, IndexError) as e:
         print(f"Parse error: {e}")
+    except Exception as e:
+        print(f"WA PROCESSING ERROR: {e}")
 
     return {"status": "ok"}
 
@@ -220,28 +223,39 @@ async def bank_inbound(request: Request):
     if not sms_body or user_phone == "unknown":
         return {"status": "ignored"}
 
-    lookup_phone = _normalize_phone(user_phone)
-
-    from agents.interpreter_agent import interpret
-    intent = await interpret(sms_body)
-    print(f"BANK INTENT: {intent['intent']} | {intent['amount']} | {intent['merchant']}")
-
-    if intent["intent"] == "bank_sms":
-        user = await users_col.find_one({"whatsapp_number": lookup_phone})
-        if user:
-            from agents.ingestion_agent import process
-            await process(lookup_phone, intent, user, send_whatsapp_message)
-        else:
-            print(f"BANK: user not found for {lookup_phone}")
-            await transactions_col.insert_one({
-                "user_phone":  lookup_phone,
-                "raw_sms":     sms_body,
-                "source":      "bank_sms",
-                "status":      "pending_parse",
-                "received_at": datetime.now(timezone.utc)
-            })
+    # Return 200 immediately — Cloudflare times out if we wait for Gemini
+    # Process the SMS in the background
+    import asyncio
+    asyncio.create_task(_process_bank_sms(sms_body, user_phone))
 
     return {"status": "ok"}
+
+
+async def _process_bank_sms(sms_body: str, user_phone: str):
+    """Background task — processes bank SMS after returning 200 to Cloudflare."""
+    try:
+        lookup_phone = _normalize_phone(user_phone)
+
+        from agents.interpreter_agent import interpret
+        intent = await interpret(sms_body)
+        print(f"BANK INTENT: {intent['intent']} | {intent['amount']} | {intent['merchant']}")
+
+        if intent["intent"] == "bank_sms":
+            user = await users_col.find_one({"whatsapp_number": lookup_phone})
+            if user:
+                from agents.ingestion_agent import process
+                await process(lookup_phone, intent, user, send_whatsapp_message)
+            else:
+                print(f"BANK: user not found for {lookup_phone}")
+                await transactions_col.insert_one({
+                    "user_phone":  lookup_phone,
+                    "raw_sms":     sms_body,
+                    "source":      "bank_sms",
+                    "status":      "pending_parse",
+                    "received_at": datetime.now(timezone.utc)
+                })
+    except Exception as e:
+        print(f"BANK PROCESSING ERROR: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -331,6 +345,55 @@ async def debug_user(phone: str):
 @app.get("/debug/base-url")
 async def debug_base_url(request: Request):
     return {"detected_base_url": get_base_url(request)}
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  7. MONGODB MCP DEMO ENDPOINT
+# ─────────────────────────────────────────────────────────────────────
+
+@app.get("/demo/mcp")
+async def mcp_demo(query: str = "What is the total spending this month across all users?"):
+    """
+    Demo endpoint showcasing MongoDB MCP Server + Gemini integration.
+
+    Try these queries:
+    - /demo/mcp?query=What is total spending this month?
+    - /demo/mcp?query=Which pocket has highest spending?
+    - /demo/mcp?query=How many users are registered?
+    - /demo/mcp?query=Show me recent transactions
+
+    Returns real MongoDB Atlas data + Gemini analysis.
+    """
+    from mcp_demo import handle_demo_query
+    result = await handle_demo_query(query)
+    return result
+
+
+@app.get("/demo/mcp/tools")
+async def mcp_tools():
+    """List all available MongoDB MCP Server tools."""
+    import httpx
+    try:
+        payload = {
+            "jsonrpc": "2.0",
+            "id":      1,
+            "method":  "tools/list",
+            "params":  {}
+        }
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            resp = await http.post("http://localhost:3000/mcp", json=payload)
+            return {
+                "mcp_server":    "http://localhost:3000/mcp",
+                "status":        "connected",
+                "tools":         resp.json().get("result", {}).get("tools", [])
+            }
+    except Exception as e:
+        return {
+            "mcp_server": "http://localhost:3000/mcp",
+            "status":     "unavailable",
+            "error":      str(e),
+            "note":       "MCP server starts with the container"
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────
