@@ -4,13 +4,15 @@ agents/ingestion_agent.py
 Ingestion Agent — handles automated bank SMS transactions.
 
 Priority order for pocket matching:
-  1. Custom merchant map  (user-taught, stored in users.merchant_map)
+  1. Custom merchant map  (user-taught)
   2. Built-in keyword map (KFC→food, Careem→transport etc.)
-  3. Gemini smart guess   (asks Gemini to pick the best pocket)
-  4. Ask user             (no match found at all)
+  3. Gemini smart guess
+  4. Ask user
 
-After confirmation of a Gemini-guessed transaction, offers to
-remember the merchant→pocket mapping permanently.
+For ALL matched transactions — first ask user: deduct or add?
+  deduct → expense, reduces pocket balance
+  add    → income received, increases pocket balance
+  discard → ignored
 """
 
 import os
@@ -62,7 +64,6 @@ MERCHANT_POCKET_MAP = {
 
 
 def _keyword_match(merchant: str, pockets: list) -> str | None:
-    """Match merchant to pocket slug via built-in keyword map."""
     if not merchant:
         return None
     m = merchant.lower()
@@ -70,7 +71,6 @@ def _keyword_match(merchant: str, pockets: list) -> str | None:
         if keyword in m:
             if any(p["slug"] == slug for p in pockets):
                 return slug
-    # Fuzzy match against user's actual pocket slugs
     for p in pockets:
         if p["slug"] in m or m in p["slug"]:
             return p["slug"]
@@ -82,13 +82,11 @@ def _keyword_match(merchant: str, pockets: list) -> str | None:
 # ─────────────────────────────────────────────────────────────────────
 
 async def _get_custom_map(user_id) -> dict:
-    """Load user's saved merchant→pocket mappings from their profile."""
     user = await users_col.find_one({"_id": user_id})
     return user.get("merchant_map", {}) if user else {}
 
 
 async def save_merchant_mapping(user_id, merchant: str, slug: str):
-    """Permanently save a merchant→pocket mapping to the user's profile."""
     key = merchant.lower().strip()
     await users_col.update_one(
         {"_id": user_id},
@@ -102,9 +100,7 @@ async def save_merchant_mapping(user_id, merchant: str, slug: str):
 # ─────────────────────────────────────────────────────────────────────
 
 async def _gemini_guess(merchant: str, pockets: list) -> str | None:
-    """Ask Gemini to pick the most likely pocket for this merchant."""
     pocket_names = [p["name"] for p in pockets]
-
     try:
         response = client.models.generate_content(
             model=MODEL,
@@ -120,43 +116,15 @@ async def _gemini_guess(merchant: str, pockets: list) -> str | None:
                 max_output_tokens=20
             )
         )
-        guess = response.text.strip()
+        guess = (response.text or "").strip()
         print(f"GEMINI GUESS for '{merchant}': {guess}")
-
         for p in pockets:
             if p["name"].lower() == guess.lower():
                 return p["slug"]
         return None
-
     except Exception as e:
         print(f"GEMINI GUESS error: {e}")
         return None
-
-
-# ─────────────────────────────────────────────────────────────────────
-#  TRANSACTION INSERT HELPER
-# ─────────────────────────────────────────────────────────────────────
-
-async def _insert_pending(
-    user_id, pocket: dict,
-    merchant: str, amount: float,
-    currency: str, raw: str
-) -> str:
-    """Insert a pending_review transaction and return its string ID."""
-    result = await transactions_col.insert_one({
-        "user_id":           user_id,
-        "pocket_id":         pocket["_id"],
-        "merchant":          merchant or "Bank transaction",
-        "amount_base":       amount,
-        "original_currency": currency,
-        "original_amount":   amount,
-        "exchange_rate":     1.0,
-        "raw_payload":       raw,
-        "timestamp":         datetime.now(timezone.utc),
-        "status":            "pending_review",
-        "source":            "bank_sms"
-    })
-    return str(result.inserted_id)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -171,7 +139,7 @@ async def process(
 ):
     """
     Process a bank SMS transaction.
-    Tries 4 matching strategies in order and notifies user.
+    Always asks user: deduct or add? before touching any balance.
     """
     amount   = intent.get("amount")
     currency = intent.get("currency") or user.get("base_currency", "PKR")
@@ -182,7 +150,6 @@ async def process(
         print(f"INGESTION: No amount found for {sender}")
         return
 
-    # Load user's active pockets
     pockets = await pockets_col.find(
         {"user_id": user_id, "is_active": True}
     ).to_list(20)
@@ -218,70 +185,46 @@ async def process(
             if matched_pocket:
                 match_source = "keyword"
 
-    # ── 3. Gemini smart guess ──────────────────────────────────────────
-    if not matched_pocket and merchant:
-        guessed_slug = await _gemini_guess(merchant, pockets)
-        if guessed_slug:
-            matched_pocket = next(
-                (p for p in pockets if p["slug"] == guessed_slug), None
-            )
-            if matched_pocket:
-                match_source = "gemini"
+    # ── Build pending intent base ──────────────────────────────────────
+    pending_base = {
+        "action":   "awaiting_deduct_or_add",
+        "amount":   amount,
+        "currency": currency,
+        "merchant": merchant,
+        "source":   "bank_sms",
+        "raw":      intent.get("raw", "")
+    }
 
-    # ── 4a. Matched — insert and notify ───────────────────────────────
     if matched_pocket:
-        txn_id      = await _insert_pending(
-            user_id, matched_pocket,
-            merchant, amount, currency,
-            intent.get("raw", "")
-        )
-        new_balance = matched_pocket["current_balance"] - amount
-
-        update = {"pending_txn_id": txn_id}
-
-        # For Gemini guesses store learn data — shown after confirm
+        # Pocket found — store it so we skip asking later
+        pending_base["pocket_slug"] = matched_pocket["slug"]
+        pending_base["pocket_name"] = matched_pocket["name"]
         if match_source == "gemini":
-            update["pending_merchant_learn"] = {
-                "merchant": merchant,
-                "slug":     matched_pocket["slug"],
-                "name":     matched_pocket["name"]
-            }
-
-        await users_col.update_one(
-            {"whatsapp_number": sender},
-            {"$set": update}
-        )
+            pending_base["gemini_guess"] = True
 
         label = {
-            "custom":  f"Matched to: *{matched_pocket['name']}* _(remembered)_",
-            "keyword": f"Matched to: *{matched_pocket['name']}*",
+            "custom":  f"Suggested: *{matched_pocket['name']}* _(remembered)_",
+            "keyword": f"Suggested: *{matched_pocket['name']}*",
             "gemini":  f"Best guess: *{matched_pocket['name']}*"
-        }.get(match_source, f"Matched to: *{matched_pocket['name']}*")
+        }.get(match_source, f"Suggested: *{matched_pocket['name']}*")
 
         await send_message(sender,
             f"🏦 *Bank transaction detected*\n"
             f"{amount:.0f} {currency} — *{merchant or 'transaction'}*\n"
-            f"{label}\n"
-            f"Balance after: *{new_balance:.2f} {currency}*\n\n"
-            "Reply *ok* to confirm or *move [pocket name]* to reassign."
+            f"{label}\n\n"
+            "Was this money you *spent* or money you *received*?\n\n"
+            "Reply *spent*, *received*, or *discard*"
         )
-
-    # ── 4b. No match — ask user ────────────────────────────────────────
     else:
-        pocket_list = "\n".join([f"• *{p['name']}*" for p in pockets])
+        # No pocket match
         await send_message(sender,
             f"🏦 *Bank transaction detected*\n"
             f"{amount:.0f} {currency} — *{merchant or 'transaction'}*\n\n"
-            f"Which pocket should I add this to?\n{pocket_list}\n\n"
-            "_Reply with the pocket name_"
+            "Should I *deduct* this from a pocket or *add* it?\n\n"
+            "Reply *deduct*, *add*, or *discard*"
         )
-        await users_col.update_one(
-            {"whatsapp_number": sender},
-            {"$set": {"pending_intent": {
-                "action":   "add_expense",
-                "amount":   amount,
-                "currency": currency,
-                "merchant": merchant,
-                "source":   "bank_sms"
-            }}}
-        )
+
+    await users_col.update_one(
+        {"whatsapp_number": sender},
+        {"$set": {"pending_intent": pending_base}}
+    )

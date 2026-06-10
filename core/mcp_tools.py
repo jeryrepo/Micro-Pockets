@@ -6,7 +6,7 @@ Atomic operations are used wherever balance updates are involved
 to prevent race conditions.
 """
 
-from database import users_col, pockets_col, transactions_col
+from core.database import users_col, pockets_col, transactions_col
 from bson import ObjectId
 from datetime import datetime, timezone
 from typing import Optional

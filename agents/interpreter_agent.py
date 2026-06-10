@@ -32,7 +32,7 @@ client = genai.Client(
     project=os.getenv("GCP_PROJECT_ID", "project-0d1e3eff-a4b4-476c-b36"),
     location=os.getenv("GCP_LOCATION", "us-central1")
 )
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-preview-05-20")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 SYSTEM_PROMPT = """

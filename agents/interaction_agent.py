@@ -138,7 +138,7 @@ async def _add_expense(
 # ─────────────────────────────────────────────────────────────────────
 
 async def _confirm(sender: str, user: dict, send_message):
-    from advisor_agent import check_alert
+    from agents.advisor_agent import check_alert
 
     txn_id = user.get("pending_txn_id")
     if not txn_id:
@@ -358,9 +358,26 @@ async def _update_budget(sender: str, intent: dict, user: dict, send_message):
             f"_e.g. 5000_")
         return
 
+    # Get current pocket first to calculate the difference
+    pocket = await pockets_col.find_one({
+        "user_id": user_id, "slug": slug, "is_active": True
+    })
+    if not pocket:
+        await send_message(sender,
+            f"Couldn't find a *{slug}* pocket.\n"
+            "Reply *balance* to see your pockets.")
+        return
+    
+    # Adjust balance by the same amount the budget changed
+    old_budget  = pocket["allocated_budget"]
+    budget_diff = amount - old_budget  # positive = increased, negative = decreased
+
     result = await pockets_col.find_one_and_update(
         {"user_id": user_id, "slug": slug, "is_active": True},
-        {"$set": {"allocated_budget": amount}},
+        {"$set": {
+            "allocated_budget": amount,
+            "current_balance":  pocket["current_balance"] + budget_diff
+        }},
         return_document=True
     )
 

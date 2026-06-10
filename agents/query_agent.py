@@ -34,7 +34,7 @@ async def handle(
     elif i == "monthly_summary":     await _monthly_summary(sender, user, send_message)
     elif i == "query_income":        await _query_income(sender, user, send_message)
     elif i == "stock_query":
-        from stock_agent import handle as stock_handle
+        from agents.stock_agent import handle as stock_handle
         await stock_handle(sender, intent, user, send_message)
     elif i == "request_advice":
         raw = (intent.get("raw") or "").lower()
@@ -75,7 +75,7 @@ async def handle(
                 f"_Try: advice me how to spend my salary_"
             )
         elif any(kw in raw for kw in income_keywords):
-            from advisor_agent import advise_spending
+            from agents.advisor_agent import advise_spending
             await advise_spending(sender, user, send_message)
         else:
             await _request_advice(sender, user, send_message)
