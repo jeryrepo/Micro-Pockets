@@ -33,8 +33,8 @@ async def handle(
     """Main entry point — routes to correct write handler."""
     i = intent["intent"]
 
-    if   i == "add_expense":       await _add_expense(sender, intent, user, send_message)
-    elif i == "delete_expense":    await _delete_expense(sender, user, send_message)
+    if   i in ("add_expense", "log_expense"):       await _add_expense(sender, intent, user, send_message)
+    elif i in ("delete_expense", "delete_last"):    await _delete_expense(sender, user, send_message)
     elif i == "create_pocket":     await _create_pocket(sender, intent, user, send_message)
     elif i == "update_budget":     await _update_budget(sender, intent, user, send_message)
     elif i == "rename_pocket":     await _rename_pocket(sender, intent, user, send_message)

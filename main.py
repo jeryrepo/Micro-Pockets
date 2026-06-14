@@ -570,7 +570,7 @@ async def _route(
     print(f"ROUTER: {sender} → {i} | lang: {detected_lang}")
 
     if i in (
-        "query_balance", "query_transactions", "monthly_summary",
+        "query_balance", "query_transactions", "monthly_summary", "check_balance", "spending_query",
         "query_income", "request_advice", "stock_query",
         "conversational_query", "help", "unknown"
     ):
