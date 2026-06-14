@@ -570,9 +570,10 @@ async def _route(
     print(f"ROUTER: {sender} → {i} | lang: {detected_lang}")
 
     if i in (
-        "query_balance", "query_transactions", "monthly_summary",
+        "check_balance", "monthly_summary", "spending_query",
         "query_income", "request_advice", "stock_query",
-        "conversational_query", "help", "unknown"
+        "greeting", "help", "unknown",
+        "query_balance", "query_transactions",
     ):
         from agents.query_agent import handle as query_handle
         await query_handle(sender, intent, user, send_whatsapp_message)
