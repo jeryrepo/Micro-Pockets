@@ -9,3 +9,4 @@ google-genai
 google-cloud-aiplatform
 google-auth
 dnspython
+# force rebuild Sun Jun 14 02:51:35 PM UTC 2026
